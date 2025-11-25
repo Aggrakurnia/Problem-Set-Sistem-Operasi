@@ -1,0 +1,146 @@
+SOAL 18
+START SCRIPT (runs every 1 hour)
+
+SET alertList = empty
+SET timestamp = current date-time
+
+--------------------------------------------------
+CHECK CPU USAGE (5-minute sampling)
+--------------------------------------------------
+cpuSamples = collect CPU usage every 10 seconds for 5 minutes
+cpuAverage = average(cpuSamples)
+
+IF cpuAverage > 80% THEN
+    alertList.add("CPU usage high: " + cpuAverage)
+END IF
+
+--------------------------------------------------
+CHECK MEMORY AVAILABLE
+--------------------------------------------------
+availableMemory = get AvailableMemoryInGB()
+
+IF availableMemory < 1GB THEN
+    alertList.add("Low Memory: " + availableMemory)
+END IF
+
+--------------------------------------------------
+CHECK DISK SPACE
+--------------------------------------------------
+FOR each disk in system:
+    freePercent = disk.FreeSpace / disk.TotalSpace * 100
+    IF freePercent < 10 THEN
+        alertList.add("Low disk space on " + disk.Name + ": " + freePercent + "%")
+    END IF
+END FOR
+
+--------------------------------------------------
+CHECK CRITICAL SERVICES
+--------------------------------------------------
+criticalServices = ["W32Time", "WinDefend", "EventLog"]
+
+FOR each service in criticalServices:
+    status = get ServiceStatus(service)
+    IF status == "Stopped" THEN
+        alertList.add("Service stopped: " + service)
+    END IF
+END FOR
+
+--------------------------------------------------
+WRITE LOG FILE
+--------------------------------------------------
+WRITE to log:
+    timestamp
+    cpuAverage
+    availableMemory
+    disk free%
+    services status
+    alertList (if any)
+
+--------------------------------------------------
+SEND EMAIL IF THERE IS ALERT
+--------------------------------------------------
+IF alertList is not empty THEN
+    SEND EMAIL:
+        To: <placeholder recipient>
+        SMTP: <placeholder SMTP server>
+        Subject: "System Alert"
+        Body: alertList + timestamp
+END IF
+
+END SCRIPT
+
+SOAL 19
+CONST BASE_DELAY = 60        // ms
+CONST MIN_DELAY  = 20
+CONST MAX_DELAY  = 150
+CONST JITTER_ALPHA = 0.1
+CONST HYSTERESIS  = 10       // ms
+CONST RTT_RETRANS_LIMIT = 100 // ms
+// State variables
+jitter = 0
+rtt = 0
+lossRate = 0
+playoutDelay = BASE_DELAY
+ReceiveBuffer = JitterBuffer()
+SendBuffer = RetransmitBuffer()
+FUNCTION OnPacketReceive(packet, arrivalTime):
+    // Update jitter estimation
+    interArrival = arrivalTime - packet.prevArrival
+    delta = abs(interArrival - packet.expectedInterval)
+    jitter = (1 - JITTER_ALPHA) * jitter + JITTER_ALPHA * delta
+    // Update loss rate
+    updateLoss(packet.sequence)
+    // Store packet for playout
+    ReceiveBuffer.insert(packet)
+    // Detect missing packets → send NACK
+    missing = ReceiveBuffer.detectMissing()
+    IF missing NOT EMPTY:
+        sendNACK(missing)
+    // Adjust buffer size periodically
+    IF timeToAdjust():
+        AdjustPlayoutDelay()
+END FUNCTION
+FUNCTION AdjustPlayoutDelay():
+    target = BASE_DELAY + 5 * jitter + 0.5 * rtt
+    target = clamp(target, MIN_DELAY, MAX_DELAY)
+    IF abs(target - playoutDelay) > HYSTERESIS:
+        playoutDelay = 0.7 * playoutDelay + 0.3 * target
+        ReceiveBuffer.resize(playoutDelay)
+    ENDIF
+END FUNCTION
+FUNCTION PlayoutLoop():
+    WHILE streaming:
+        now = currentTime()
+        readyTime = now - playoutDelay
+        packet = ReceiveBuffer.popReady(readyTime)
+        IF packet == NULL:
+            handleUnderrun()
+            CONTINUE
+        ENDIF
+        IF packet.complete:
+            decode(packet)
+        ELSE:
+            HandleLoss(packet)
+        ENDIF
+    ENDWHILE
+END FUNCTION
+FUNCTION HandleLoss(packet):
+    IF packet.isCritical():        // audio or keyframe
+        IF rtt < RTT_RETRANS_LIMIT:
+            requestRetransmit(packet.sequence)
+            IF retransmitArrivesSoon():
+                decode(retransmittedPacket)
+                RETURN
+            ENDIF
+        ENDIF
+        conceal(packet)            // fallback for critical packets
+        RETURN
+    ENDIF
+    // Non-critical video frames
+    IF canInterpolate():
+        interpolate()
+    ELSE:
+        skipFrame()
+    ENDIF
+END FUNCTION
+
